@@ -35,9 +35,12 @@ def detect_human(image_path):
         return False
 
     results = model(img)[0]
+
     for box in results.boxes:
         cls = int(box.cls[0])
         if model.names[cls] == "person":
+            print("✅ Human detected")
             return True
 
+    print("❌ No human detected")
     return False
