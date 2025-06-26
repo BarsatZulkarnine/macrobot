@@ -4,7 +4,7 @@ myenv\Scripts\activate
 
 pip install -r requirements.txt
 
-pyhton3 app.py
+python3 app.py
 
 
 
