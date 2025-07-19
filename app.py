@@ -121,7 +121,12 @@ def update_position():
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    image = request.files.get('image')
+    # Read from request.files (multipart) OR raw data
+    if 'image' in request.files:
+        image = request.files['image']
+    else:
+        image = request.stream  # raw binary
+
     pos = load_json(POSITION_FILE, {})
     x = pos.get('x')
     y = pos.get('y')
@@ -131,30 +136,30 @@ def upload_image():
 
     filename = f"{x}_{y}_{uuid.uuid4().hex}.jpg"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
-    image.save(filepath)
 
-    print(f"[SERVER] Received image for position ({x}, {y})")
+    # Save raw stream if not multipart
+    if hasattr(image, 'save'):
+        image.save(filepath)
+    else:
+        with open(filepath, 'wb') as f:
+            f.write(image.read())
 
+    print(f"[SERVER] Image received at ({x}, {y})")
+
+    # Human detection
     is_human = detect_human(filepath)
 
-    # Update map
+    # Update map + detections (same as before)
     map_data = load_json(MAP_DATA_FILE)
     if not any(p['x'] == x and p['y'] == y for p in map_data):
         map_data.append({'x': x, 'y': y, 'visited': True})
     save_json(MAP_DATA_FILE, map_data)
 
-    # Update detections (overwrite if exists)
     detections = load_json(DETECTION_FILE)
     detections = [d for d in detections if not (d['x'] == x and d['y'] == y)]
-    detections.append({
-        'x': x,
-        'y': y,
-        'human': is_human,
-        'image': f'uploads/{filename}'
-    })
+    detections.append({'x': x, 'y': y, 'human': is_human, 'image': f'uploads/{filename}'})
     save_json(DETECTION_FILE, detections)
 
-    # Allow robot to continue
     status = load_json(STATUS_FILE, {})
     if not status.get('manual_stop', False):
         status['start'] = True
@@ -163,7 +168,8 @@ def upload_image():
     return jsonify({'status': 'ok', 'human': is_human})
 
 
-# ---------------------- DATA SERVING ------------------------
+
+#------------------ DATA SERVING ------------------------
 
 @app.route('/data/map.json')
 def get_map():
