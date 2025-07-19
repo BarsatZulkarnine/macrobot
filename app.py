@@ -30,115 +30,16 @@ def save_json(path, data):
 def index():
     return render_template('index.html')
 
-@app.route('/status')
+
+# ---------------------- STATUS ------------------------
+
+@app.route('/status', methods=['GET'])
 def get_status():
     return jsonify(load_json(STATUS_FILE, {
-        'esp8266': True,
-        'esp32cam': True,
+        'esp8266': False,
+        'esp32cam': False,
         'start': False
     }))
-
-@app.route('/start', methods=['POST'])
-def start():
-    status = load_json(STATUS_FILE, {})
-    status['start'] = True
-    save_json(STATUS_FILE, status)
-    return jsonify({'status': 'started'})
-
-@app.route('/stop', methods=['POST'])
-def stop():
-    status = load_json(STATUS_FILE, {})
-    status['start'] = False
-    status['manual_stop'] = True
-    save_json(STATUS_FILE, status)
-    return jsonify({'status': 'stopped'})
-
-@app.route('/should_move')
-def should_move():
-    status = load_json(STATUS_FILE, {})
-    return jsonify({'move': status.get('start', False)})
-
-@app.route('/position', methods=['POST'])
-def update_position():
-    data = request.get_json()
-    x, y = data.get('x'), data.get('y')
-    if x is None or y is None:
-        return jsonify({'error': 'Missing coordinates'}), 400
-
-    prev = load_json(POSITION_FILE, {})
-    if prev.get('x') != x or prev.get('y') != y:
-        save_json(POSITION_FILE, {'x': x, 'y': y})
-        status = load_json(STATUS_FILE, {})
-        status['start'] = False
-        status['manual_stop'] = False
-        save_json(STATUS_FILE, status)
-        return jsonify({'action': 'await_image'})
-
-    return jsonify({'action': 'continue'})
-
-@app.route('/upload', methods=['POST'])
-def upload_image():
-    image = request.files.get('image')
-
-    # Get last known position from position.json
-    pos = load_json(POSITION_FILE, {})
-    x = pos.get('x')
-    y = pos.get('y')
-
-    if not image or x is None or y is None:
-        return jsonify({'error': 'Missing image or position data'}), 400
-
-    filename = f"{x}_{y}_{uuid.uuid4().hex}.jpg"
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
-    image.save(filepath)
-
-    print(f"[SERVER] Received image from ESP32-CAM for position ({x}, {y})")
-
-    is_human = detect_human(filepath)
-
-    # Update map
-    map_data = load_json(MAP_DATA_FILE)
-    if not any(p['x'] == x and p['y'] == y for p in map_data):
-        map_data.append({'x': x, 'y': y, 'visited': True})
-    save_json(MAP_DATA_FILE, map_data)
-
-    # Update detections
-    detections = load_json(DETECTION_FILE)
-
-    # Remove old entry for this coordinate
-    detections = [d for d in detections if not (d['x'] == x and d['y'] == y)]
-
-    # Add updated entry
-    detections.append({
-        'x': x,
-        'y': y,
-        'human': is_human,
-        'image': f'uploads/{filename}'
-    })
-
-    save_json(DETECTION_FILE, detections)
-
-
-    # Allow robot to move again if not manually stopped
-    status = load_json(STATUS_FILE, {})
-    if not status.get('manual_stop', False):
-        status['start'] = True
-    save_json(STATUS_FILE, status)
-
-    return jsonify({'status': 'ok', 'human': is_human})
-
-@app.route('/data/map.json')
-def get_map():
-    return jsonify(load_json(MAP_DATA_FILE))
-
-@app.route('/data/detections')
-def get_detections():
-    return jsonify(load_json(DETECTION_FILE))
-
-@app.route('/uploads/<path:filename>')
-def serve_image(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
 
 @app.route('/status/esp8266', methods=['POST'])
 def update_esp8266_status():
@@ -157,6 +58,127 @@ def update_esp32cam_status():
     data['esp32cam'] = value
     save_json(STATUS_FILE, data)
     return jsonify({'status': f'esp32cam set to {value}'})
+
+
+# ---------------------- CONTROL ------------------------
+
+@app.route('/start', methods=['POST'])
+def start():
+    status = load_json(STATUS_FILE, {})
+    status['start'] = True
+    status['manual_stop'] = False
+    save_json(STATUS_FILE, status)
+    return jsonify({'status': 'started'})
+
+@app.route('/stop', methods=['POST'])
+def stop():
+    status = load_json(STATUS_FILE, {})
+    status['start'] = False
+    status['manual_stop'] = True
+    save_json(STATUS_FILE, status)
+    return jsonify({'status': 'stopped'})
+
+@app.route('/should_move', methods=['GET'])
+def should_move():
+    status = load_json(STATUS_FILE, {})
+    return jsonify({'move': status.get('start', False)})
+
+@app.route('/need_image', methods=['GET'])
+def need_image():
+    pos = load_json(POSITION_FILE, {})
+    detections = load_json(DETECTION_FILE)
+
+    for d in detections:
+        if d['x'] == pos.get('x') and d['y'] == pos.get('y'):
+            return jsonify({'needed': False})
+
+    return jsonify({'needed': True})
+
+
+# ---------------------- POSITION ------------------------
+
+@app.route('/position', methods=['POST'])
+def update_position():
+    data = request.get_json()
+    x, y = data.get('x'), data.get('y')
+    if x is None or y is None:
+        return jsonify({'error': 'Missing coordinates'}), 400
+
+    prev = load_json(POSITION_FILE, {})
+    if prev.get('x') != x or prev.get('y') != y:
+        save_json(POSITION_FILE, {'x': x, 'y': y})
+        status = load_json(STATUS_FILE, {})
+        status['start'] = False
+        status['manual_stop'] = False
+        save_json(STATUS_FILE, status)
+        print(f"[SERVER] New position received: ({x}, {y}) → waiting for image")
+        return jsonify({'action': 'await_image'})
+
+    return jsonify({'action': 'continue'})
+
+
+# ---------------------- UPLOAD IMAGE ------------------------
+
+@app.route('/upload', methods=['POST'])
+def upload_image():
+    image = request.files.get('image')
+    pos = load_json(POSITION_FILE, {})
+    x = pos.get('x')
+    y = pos.get('y')
+
+    if not image or x is None or y is None:
+        return jsonify({'error': 'Missing image or position data'}), 400
+
+    filename = f"{x}_{y}_{uuid.uuid4().hex}.jpg"
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    image.save(filepath)
+
+    print(f"[SERVER] Received image for position ({x}, {y})")
+
+    is_human = detect_human(filepath)
+
+    # Update map
+    map_data = load_json(MAP_DATA_FILE)
+    if not any(p['x'] == x and p['y'] == y for p in map_data):
+        map_data.append({'x': x, 'y': y, 'visited': True})
+    save_json(MAP_DATA_FILE, map_data)
+
+    # Update detections (overwrite if exists)
+    detections = load_json(DETECTION_FILE)
+    detections = [d for d in detections if not (d['x'] == x and d['y'] == y)]
+    detections.append({
+        'x': x,
+        'y': y,
+        'human': is_human,
+        'image': f'uploads/{filename}'
+    })
+    save_json(DETECTION_FILE, detections)
+
+    # Allow robot to continue
+    status = load_json(STATUS_FILE, {})
+    if not status.get('manual_stop', False):
+        status['start'] = True
+    save_json(STATUS_FILE, status)
+
+    return jsonify({'status': 'ok', 'human': is_human})
+
+
+# ---------------------- DATA SERVING ------------------------
+
+@app.route('/data/map.json')
+def get_map():
+    return jsonify(load_json(MAP_DATA_FILE))
+
+@app.route('/data/detections')
+def get_detections():
+    return jsonify(load_json(DETECTION_FILE))
+
+@app.route('/uploads/<path:filename>')
+def serve_image(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+
+# ---------------------- MAIN ------------------------
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
