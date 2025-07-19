@@ -1,14 +1,8 @@
 [
   {
-    "x": 3,
-    "y": 1,
+    "x": 4,
+    "y": 7,
     "human": true,
-    "image": "uploads/3_1_7ad315a012f1425a9aa94d06f7827de0.jpg"
-  },
-  {
-    "x": 3,
-    "y": 1,
-    "human": false,
-    "image": "uploads/3_1_e4a87fed6b5640aba9cbb6e287ca4538.jpg"
+    "image": "uploads/4_7_c8d0994c42624dc58b5cfa73e945137a.jpg"
   }
 ]
