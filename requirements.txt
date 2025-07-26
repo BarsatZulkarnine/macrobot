@@ -4,3 +4,6 @@ opencv-python
 python-multipart
 jinja2
 flask
+mediapipe
+ultralytics
+tensorflow

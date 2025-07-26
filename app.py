@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory, render_template
 import os, uuid, json
-from detector.model import detect_human
+from detector.model import detect_human_simple
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 
@@ -147,7 +147,7 @@ def upload_image():
     print(f"[SERVER] Image received at ({x}, {y})")
 
     # Human detection
-    is_human = detect_human(filepath)
+    is_human = detect_human_simple(filepath)
 
     # Update map + detections (same as before)
     map_data = load_json(MAP_DATA_FILE)
