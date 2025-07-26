@@ -14,27 +14,26 @@ export function renderGrid(containerId, gridData) {
       const cell = document.createElement('div');
       cell.className = 'cell';
 
-      if (grid[key] === 'visited') {
-        cell.classList.add('visited');
-        row.appendChild(cell);
-      } else if (grid[key] === 'human') {
-          cell.classList.add('human');
+     if (grid[key] === 'visited' || grid[key] === 'human') {
+  cell.classList.add(grid[key]); // adds 'visited' or 'human'
 
-        // Create clickable link inside the cell
-        const link = document.createElement('a');
-        link.href = `${UPLOAD_BASE}${gridImages[key]}`;
-        link.target = '_blank';
-        link.style.display = 'block';
-        link.style.width = '100%';
-        link.style.height = '100%';
+  // Create clickable link inside the cell
+  if (gridImages[key]) {
+    const link = document.createElement('a');
+    link.href = `${UPLOAD_BASE}${gridImages[key]}`;
+    link.target = '_blank';
+    link.style.display = 'block';
+    link.style.width = '100%';
+    link.style.height = '100%';
+    cell.appendChild(link);
+  }
 
-        // Append link inside cell, not outside
-        cell.appendChild(link);
-        row.appendChild(cell);
-      } else {
-        // For empty or unknown cells
-        row.appendChild(cell);
-      }
+  row.appendChild(cell);
+} else {
+  // For empty or unknown cells
+  row.appendChild(cell);
+}
+
     }
 
     container.appendChild(row);

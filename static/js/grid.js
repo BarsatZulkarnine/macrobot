@@ -10,13 +10,12 @@ export function buildGrid(map, detections) {
     grid[key] = 'visited';
   });
 
-  detections.forEach(d => {
-    const key = `${d.x},${d.y}`;
-    if (d.human) {
-      grid[key] = 'human';
-      gridImages[key] = d.image.split('/').pop();
-    }
-  });
+detections.forEach(d => {
+  const key = `${d.x},${d.y}`;
+  grid[key] = d.human ? 'human' : 'visited';  // Mark visited if not human
+  gridImages[key] = d.image.split('/').pop(); // Always store image
+});
+
 
   return { grid, gridImages, bounds: getBounds(knownPoints) };
 }
