@@ -1,32 +1,31 @@
+// ESP32-CAM IMPROVED CODE WITH ROBUST ERROR HANDLING
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
-// Wi-Fi Configuration - Update these to match your ESP8266
+// Wi-Fi Configuration
 const char* ssid = "Khalili";
 const char* password = "Khalili007070700";
 const char* serverUrl = "http://192.168.0.111:8000";
 
-// Timing
+// Timing and retry configuration
 unsigned long lastStatusCheck = 0;
-const unsigned long STATUS_CHECK_INTERVAL = 1500; // Check every 1.5 seconds
+const unsigned long STATUS_CHECK_INTERVAL = 2000; // Increased to 2 seconds
+const int MAX_RETRIES = 3;
+const int UPLOAD_TIMEOUT = 30000; // 30 seconds timeout
+const int STATUS_TIMEOUT = 10000;  // 10 seconds timeout
 
-// Camera state
+// Camera and connection state
 bool cameraInitialized = false;
+int consecutiveFailures = 0;
+const int MAX_CONSECUTIVE_FAILURES = 5;
 
 void setup() {
   Serial.begin(115200);
   
-  // Connect to WiFi
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connected");
-  Serial.println(WiFi.localIP());
+  // Connect to WiFi with retry logic
+  connectToWiFi();
   
   // Initialize camera
   if (setupCamera()) {
@@ -38,14 +37,30 @@ void setup() {
 }
 
 void loop() {
+  // Check WiFi connection
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected, reconnecting...");
+    connectToWiFi();
+    delay(1000);
+    return;
+  }
+  
   if (!cameraInitialized) {
     Serial.println("Camera not initialized, retrying...");
     if (setupCamera()) {
       cameraInitialized = true;
       Serial.println("Camera initialized successfully");
+      consecutiveFailures = 0;
+    } else {
+      delay(5000);
+      return;
     }
-    delay(5000);
-    return;
+  }
+  
+  // Reset device if too many consecutive failures
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    Serial.println("Too many consecutive failures, restarting...");
+    ESP.restart();
   }
   
   // Check if robot needs image
@@ -55,6 +70,28 @@ void loop() {
   }
   
   delay(100);
+}
+
+void connectToWiFi() {
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    consecutiveFailures = 0;
+  } else {
+    Serial.println("\nWiFi connection failed!");
+    consecutiveFailures++;
+  }
 }
 
 bool setupCamera() {
@@ -80,8 +117,9 @@ bool setupCamera() {
   
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA;  // Higher quality for better detection
-  config.jpeg_quality = 8;           // Lower number = higher quality
+  // Reduced quality for better network transmission
+  config.frame_size = FRAMESIZE_SVGA;  // Reduced from VGA
+  config.jpeg_quality = 12;            // Increased from 8 (lower quality, smaller file)
   config.fb_count = 1;
   
   // Initialize camera
@@ -91,31 +129,31 @@ bool setupCamera() {
     return false;
   }
   
-  // Get camera sensor and adjust settings for better human detection
+  // Get camera sensor and adjust settings
   sensor_t* s = esp_camera_sensor_get();
   if (s != NULL) {
-    s->set_brightness(s, 0);     // -2 to 2
-    s->set_contrast(s, 1);       // -2 to 2
-    s->set_saturation(s, 0);     // -2 to 2
-    s->set_special_effect(s, 0); // 0 to 6 (0-No Effect, 1-Negative, 2-Grayscale, 3-Red Tint, 4-Green Tint, 5-Blue Tint, 6-Sepia)
-    s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
-    s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
-    s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
-    s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
-    s->set_aec2(s, 0);           // 0 = disable , 1 = enable
-    s->set_ae_level(s, 0);       // -2 to 2
-    s->set_aec_value(s, 300);    // 0 to 1200
-    s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
-    s->set_agc_gain(s, 0);       // 0 to 30
-    s->set_gainceiling(s, (gainceiling_t)0);  // 0 to 6
-    s->set_bpc(s, 0);            // 0 = disable , 1 = enable
-    s->set_wpc(s, 1);            // 0 = disable , 1 = enable
-    s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
-    s->set_lenc(s, 1);           // 0 = disable , 1 = enable
-    s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
-    s->set_vflip(s, 0);          // 0 = disable , 1 = enable
-    s->set_dcw(s, 1);            // 0 = disable , 1 = enable
-    s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 1);
+    s->set_saturation(s, 0);
+    s->set_special_effect(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);
+    s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 0);
+    s->set_ae_level(s, 0);
+    s->set_aec_value(s, 300);
+    s->set_gain_ctrl(s, 1);
+    s->set_agc_gain(s, 0);
+    s->set_gainceiling(s, (gainceiling_t)0);
+    s->set_bpc(s, 0);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);
+    s->set_lenc(s, 1);
+    s->set_hmirror(s, 0);
+    s->set_vflip(s, 0);
+    s->set_dcw(s, 1);
+    s->set_colorbar(s, 0);
   }
   
   return true;
@@ -123,14 +161,16 @@ bool setupCamera() {
 
 void checkAndCaptureImage() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected");
+    Serial.println("WiFi disconnected during status check");
+    consecutiveFailures++;
     return;
   }
   
-  // Check robot status to see if image is needed
+  // Check robot status with timeout
   WiFiClient client;
   HTTPClient http;
   http.begin(client, String(serverUrl) + "/robot/status");
+  http.setTimeout(STATUS_TIMEOUT);
   
   int httpCode = http.GET();
   if (httpCode == 200) {
@@ -149,74 +189,154 @@ void checkAndCaptureImage() {
         
         Serial.printf("Image needed at position (%d, %d). Capturing...\n", currentX, currentY);
         
-        // Small delay to ensure robot has stopped moving
-        delay(500);
+        // Wait longer to ensure robot has stopped moving
+        delay(1500);
         
-        captureAndUploadImage();
-      } else {
-        // Serial.println("No image needed at this time");
+        if (captureAndUploadImageWithRetry()) {
+          consecutiveFailures = 0;
+        } else {
+          consecutiveFailures++;
+        }
       }
     } else {
       Serial.println("Failed to parse status response");
+      consecutiveFailures++;
     }
   } else {
     Serial.printf("Status check failed: %d\n", httpCode);
+    consecutiveFailures++;
   }
   
   http.end();
 }
 
-void captureAndUploadImage() {
+bool captureAndUploadImageWithRetry() {
+  for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    Serial.printf("Upload attempt %d/%d\n", attempt, MAX_RETRIES);
+    
+    if (captureAndUploadImage()) {
+      Serial.println("Upload successful!");
+      return true;
+    }
+    
+    if (attempt < MAX_RETRIES) {
+      Serial.printf("Upload failed, retrying in %d seconds...\n", attempt * 2);
+      delay(attempt * 2000); // Progressive delay
+    }
+  }
+  
+  Serial.println("All upload attempts failed!");
+  return false;
+}
+
+bool captureAndUploadImage() {
   // Capture image
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Camera capture failed");
-    return;
+    return false;
   }
   
   Serial.printf("Image captured: %d bytes\n", fb->len);
   
-  // Upload image
+  // Check if image is too large
+  if (fb->len > 100000) { // 100KB limit
+    Serial.printf("Image too large (%d bytes), reducing quality\n", fb->len);
+    esp_camera_fb_return(fb);
+    
+    // Temporarily reduce quality
+    sensor_t* s = esp_camera_sensor_get();
+    if (s != NULL) {
+      s->set_jpeg_quality(s, 20); // Lower quality
+    }
+    
+    // Try again
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("Second capture failed");
+      return false;
+    }
+    
+    // Restore quality
+    if (s != NULL) {
+      s->set_jpeg_quality(s, 12);
+    }
+  }
+  
+  // Upload image with extended timeout
   WiFiClient client;
   HTTPClient http;
+  
+  // Set longer timeout for image upload
+  http.setTimeout(UPLOAD_TIMEOUT);
   http.begin(client, String(serverUrl) + "/robot/image");
   http.addHeader("Content-Type", "image/jpeg");
-  http.setTimeout(15000); // 15 second timeout
+  http.addHeader("Content-Length", String(fb->len));
   
+  Serial.println("Starting image upload...");
   int httpCode = http.POST(fb->buf, fb->len);
   
   if (httpCode > 0) {
-    String response = http.getString();
-    Serial.printf("Image uploaded successfully. Response code: %d\n", httpCode);
-    Serial.println("Server response: " + response);
+    Serial.printf("Upload successful! Response code: %d\n", httpCode);
     
-    // Parse response to check for human detection
-    StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, response);
-    if (!error && doc.containsKey("human_detected")) {
-      bool humanDetected = doc["human_detected"];
-      Serial.printf("Human detection result: %s\n", humanDetected ? "DETECTED" : "NOT DETECTED");
+    if (httpCode == 200) {
+      String response = http.getString();
+      Serial.println("Server response: " + response);
+      
+      // Parse response to check for human detection
+      StaticJsonDocument<256> doc;
+      DeserializationError error = deserializeJson(doc, response);
+      if (!error && doc.containsKey("human_detected")) {
+        bool humanDetected = doc["human_detected"];
+        Serial.printf("Human detection result: %s\n", humanDetected ? "DETECTED" : "NOT DETECTED");
+      }
     }
+    
+    http.end();
+    esp_camera_fb_return(fb);
+    return true;
   } else {
     Serial.printf("Image upload failed. HTTP code: %d\n", httpCode);
     String error = http.errorToString(httpCode);
     Serial.println("Error: " + error);
+    
+    // Log specific error types
+    switch (httpCode) {
+      case -1:
+        Serial.println("Connection failed - check server availability");
+        break;
+      case -5:
+        Serial.println("Connection lost - network unstable");
+        break;
+      case -11:
+        Serial.println("Read timeout - server too slow or image too large");
+        break;
+      default:
+        Serial.printf("Unknown error code: %d\n", httpCode);
+        break;
+    }
+    
+    http.end();
+    esp_camera_fb_return(fb);
+    return false;
+  }
+}
+
+// Test function for connectivity
+void testConnectivity() {
+  Serial.println("Testing server connectivity...");
+  
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(5000);
+  http.begin(client, String(serverUrl) + "/robot/status");
+  
+  int httpCode = http.GET();
+  if (httpCode > 0) {
+    Serial.printf("Server is reachable! Response: %d\n", httpCode);
+  } else {
+    Serial.printf("Server unreachable! Error: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
   }
   
   http.end();
-  esp_camera_fb_return(fb);
-}
-
-// Optional: Function to test camera capture without uploading
-void testCameraCapture() {
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    return;
-  }
-  
-  Serial.printf("Test capture successful: %d bytes, %dx%d pixels\n", 
-                fb->len, fb->width, fb->height);
-  
-  esp_camera_fb_return(fb);
 }
