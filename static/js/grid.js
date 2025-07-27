@@ -1,33 +1,69 @@
-// static/js/grid.js
-export function buildGrid(map, detections) {
-  const knownPoints = new Set();
+export function buildGrid(mapData, robotData) {
   const grid = {};
   const gridImages = {};
-
-  map.forEach(p => {
-    const key = `${p.x},${p.y}`;
-    knownPoints.add(key);
-    grid[key] = 'visited';
+  const allPositions = new Set();
+  
+  // Add visited positions from map data
+  mapData.visited_positions.forEach(pos => {
+    const key = `${pos.x},${pos.y}`;
+    allPositions.add(key);
+    
+    // Set cell type based on human detection
+    grid[key] = pos.human_detected ? 'human' : 'visited';
+    
+    // Extract just the filename from image path
+    if (pos.image_path) {
+      gridImages[key] = pos.image_path.replace('uploads/', '');
+    }
   });
-
-detections.forEach(d => {
-  const key = `${d.x},${d.y}`;
-  grid[key] = d.human ? 'human' : 'visited';  // Mark visited if not human
-  gridImages[key] = d.image.split('/').pop(); // Always store image
-});
-
-
-  return { grid, gridImages, bounds: getBounds(knownPoints) };
+  
+  // Add exploration stack positions (planned but not visited)
+  mapData.exploration_stack.forEach(pos => {
+    const key = `${pos.x},${pos.y}`;
+    if (!grid[key]) { // Only if not already visited
+      allPositions.add(key);
+      grid[key] = 'planned';
+    }
+  });
+  
+  // Add current robot position
+  if (robotData.current_x !== undefined && robotData.current_y !== undefined) {
+    const robotKey = `${robotData.current_x},${robotData.current_y}`;
+    allPositions.add(robotKey);
+    
+    // If robot is at unvisited position, mark as current
+    if (!grid[robotKey] || grid[robotKey] === 'planned') {
+      grid[robotKey] = 'current';
+    } else {
+      // Robot is at visited position, add special marker
+      grid[robotKey] = grid[robotKey] + ' current';
+    }
+  }
+  
+  return { 
+    grid, 
+    gridImages, 
+    bounds: getBounds(allPositions),
+    robotData,
+    mapData
+  };
 }
 
-function getBounds(points) {
-  const coords = Array.from(points).map(k => k.split(',').map(Number));
+function getBounds(positions) {
+  if (positions.size === 0) {
+    return { minX: -2, maxX: 2, minY: -2, maxY: 2 }; // Default view
+  }
+  
+  const coords = Array.from(positions).map(k => k.split(',').map(Number));
   const xs = coords.map(c => c[0]);
   const ys = coords.map(c => c[1]);
+  
+  // Add padding around the grid
+  const padding = 1;
   return {
-    minX: Math.min(...xs),
-    maxX: Math.max(...xs),
-    minY: Math.min(...ys),
-    maxY: Math.max(...ys)
+    minX: Math.min(...xs) - padding,
+    maxX: Math.max(...xs) + padding,
+    minY: Math.min(...ys) - padding,
+    maxY: Math.max(...ys) + padding
   };
 }
