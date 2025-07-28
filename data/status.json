@@ -1,6 +1,0 @@
-{
-  "esp8266": true,
-  "esp32cam": false,
-  "start": true,
-  "manual_stop": false
-}

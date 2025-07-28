@@ -11,18 +11,22 @@ const char* serverUrl = "http://192.168.0.111:8000";
 
 // Timing and retry configuration
 unsigned long lastStatusCheck = 0;
-const unsigned long STATUS_CHECK_INTERVAL = 2000; // Increased to 2 seconds
+const unsigned long STATUS_CHECK_INTERVAL = 3000; // Increased to 3 seconds
 const int MAX_RETRIES = 3;
 const int UPLOAD_TIMEOUT = 30000; // 30 seconds timeout
 const int STATUS_TIMEOUT = 10000;  // 10 seconds timeout
+const int WIFI_RETRY_DELAY = 5000; // 5 seconds
 
 // Camera and connection state
 bool cameraInitialized = false;
 int consecutiveFailures = 0;
 const int MAX_CONSECUTIVE_FAILURES = 5;
+int wifiReconnectAttempts = 0;
+const int MAX_WIFI_RECONNECT_ATTEMPTS = 5;
 
 void setup() {
   Serial.begin(115200);
+  Serial.println("\n=== ESP32-CAM Controller Starting ===");
   
   // Connect to WiFi with retry logic
   connectToWiFi();
@@ -31,6 +35,13 @@ void setup() {
   if (setupCamera()) {
     cameraInitialized = true;
     Serial.println("Camera initialized successfully");
+    
+    // Test server connectivity
+    if (testServerConnectivity()) {
+      Serial.println("Server connectivity test passed");
+    } else {
+      Serial.println("Warning: Server connectivity test failed");
+    }
   } else {
     Serial.println("Camera initialization failed!");
   }
@@ -41,8 +52,10 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected, reconnecting...");
     connectToWiFi();
-    delay(1000);
-    return;
+    if (WiFi.status() != WL_CONNECTED) {
+      delay(WIFI_RETRY_DELAY);
+      return;
+    }
   }
   
   if (!cameraInitialized) {
@@ -84,13 +97,44 @@ void connectToWiFi() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected");
+    Serial.println();
+    Serial.println("WiFi connected!");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
+    Serial.print("Signal strength (RSSI): ");
+    Serial.println(WiFi.RSSI());
     consecutiveFailures = 0;
+    wifiReconnectAttempts = 0;
   } else {
-    Serial.println("\nWiFi connection failed!");
+    Serial.println();
+    Serial.println("WiFi connection failed!");
     consecutiveFailures++;
+    wifiReconnectAttempts++;
+    
+    if (wifiReconnectAttempts >= MAX_WIFI_RECONNECT_ATTEMPTS) {
+      Serial.println("Max WiFi reconnection attempts reached. Restarting ESP...");
+      ESP.restart();
+    }
+  }
+}
+
+bool testServerConnectivity() {
+  Serial.println("Testing server connectivity...");
+  
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(5000);
+  http.begin(client, String(serverUrl) + "/health");
+  
+  int httpCode = http.GET();
+  http.end();
+  
+  if (httpCode == 200) {
+    Serial.println("Server is reachable!");
+    return true;
+  } else {
+    Serial.printf("Server unreachable. HTTP code: %d\n", httpCode);
+    return false;
   }
 }
 
@@ -117,10 +161,10 @@ bool setupCamera() {
   
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  // Reduced quality for better network transmission
-  config.frame_size = FRAMESIZE_SVGA;  // Reduced from VGA
-  config.jpeg_quality = 12;            // Increased from 8 (lower quality, smaller file)
-  config.fb_count = 1;
+  // Optimized settings for better network transmission
+  config.frame_size = FRAMESIZE_SVGA;  // Good balance between quality and size
+  config.jpeg_quality = 15;            // Reasonable quality (lower number = higher quality)
+  config.fb_count = 1;                 // Use single frame buffer
   
   // Initialize camera
   esp_err_t err = esp_camera_init(&config);
@@ -129,31 +173,35 @@ bool setupCamera() {
     return false;
   }
   
-  // Get camera sensor and adjust settings
+  // Get camera sensor and adjust settings for optimal performance
   sensor_t* s = esp_camera_sensor_get();
   if (s != NULL) {
-    s->set_brightness(s, 0);
-    s->set_contrast(s, 1);
-    s->set_saturation(s, 0);
-    s->set_special_effect(s, 0);
-    s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
-    s->set_wb_mode(s, 0);
-    s->set_exposure_ctrl(s, 1);
-    s->set_aec2(s, 0);
-    s->set_ae_level(s, 0);
-    s->set_aec_value(s, 300);
-    s->set_gain_ctrl(s, 1);
-    s->set_agc_gain(s, 0);
-    s->set_gainceiling(s, (gainceiling_t)0);
-    s->set_bpc(s, 0);
-    s->set_wpc(s, 1);
-    s->set_raw_gma(s, 1);
-    s->set_lenc(s, 1);
-    s->set_hmirror(s, 0);
-    s->set_vflip(s, 0);
-    s->set_dcw(s, 1);
-    s->set_colorbar(s, 0);
+    s->set_brightness(s, 0);     // -2 to 2
+    s->set_contrast(s, 1);       // -2 to 2
+    s->set_saturation(s, 0);     // -2 to 2
+    s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect, 1 - Negative, 2 - Grayscale, 3 - Red Tint, 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
+    s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
+    s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
+    s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
+    s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
+    s->set_aec2(s, 0);           // 0 = disable , 1 = enable
+    s->set_ae_level(s, 0);       // -2 to 2
+    s->set_aec_value(s, 300);    // 0 to 1200
+    s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
+    s->set_agc_gain(s, 0);       // 0 to 30
+    s->set_gainceiling(s, (gainceiling_t)0);  // 0 to 6
+    s->set_bpc(s, 0);            // 0 = disable , 1 = enable
+    s->set_wpc(s, 1);            // 0 = disable , 1 = enable
+    s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
+    s->set_lenc(s, 1);           // 0 = disable , 1 = enable
+    s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
+    s->set_vflip(s, 0);          // 0 = disable , 1 = enable
+    s->set_dcw(s, 1);            // 0 = disable , 1 = enable
+    s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
+    
+    Serial.println("Camera sensor settings applied successfully");
+  } else {
+    Serial.println("Warning: Could not get camera sensor for configuration");
   }
   
   return true;
@@ -190,20 +238,28 @@ void checkAndCaptureImage() {
         Serial.printf("Image needed at position (%d, %d). Capturing...\n", currentX, currentY);
         
         // Wait longer to ensure robot has stopped moving
-        delay(1500);
+        delay(2000);
         
         if (captureAndUploadImageWithRetry()) {
           consecutiveFailures = 0;
+          Serial.println("Image capture and upload successful");
         } else {
           consecutiveFailures++;
+          Serial.println("Image capture and upload failed");
         }
+      } else {
+        // Reset failure count on successful status check when no image needed
+        consecutiveFailures = 0;
       }
     } else {
-      Serial.println("Failed to parse status response");
+      Serial.printf("Failed to parse status response: %s\n", error.c_str());
       consecutiveFailures++;
     }
+  } else if (httpCode > 0) {
+    Serial.printf("Status check failed with code: %d\n", httpCode);
+    consecutiveFailures++;
   } else {
-    Serial.printf("Status check failed: %d\n", httpCode);
+    Serial.printf("Status check connection failed: %s\n", http.errorToString(httpCode).c_str());
     consecutiveFailures++;
   }
   
@@ -230,37 +286,36 @@ bool captureAndUploadImageWithRetry() {
 }
 
 bool captureAndUploadImage() {
-  // Capture image
-  camera_fb_t* fb = esp_camera_fb_get();
+  // Clear any pending camera operations
+  camera_fb_t* fb = nullptr;
+  
+  // Multiple capture attempts
+  for (int captureAttempt = 1; captureAttempt <= 3; captureAttempt++) {
+    fb = esp_camera_fb_get();
+    if (fb) {
+      break;
+    }
+    Serial.printf("Camera capture attempt %d failed\n", captureAttempt);
+    delay(500);
+  }
+  
   if (!fb) {
-    Serial.println("Camera capture failed");
+    Serial.println("All camera capture attempts failed");
     return false;
   }
   
   Serial.printf("Image captured: %d bytes\n", fb->len);
   
-  // Check if image is too large
-  if (fb->len > 100000) { // 100KB limit
-    Serial.printf("Image too large (%d bytes), reducing quality\n", fb->len);
+  // Check if image is reasonable size
+  if (fb->len < 1000) {
+    Serial.println("Image too small, likely corrupted");
     esp_camera_fb_return(fb);
-    
-    // Temporarily reduce quality
-    sensor_t* s = esp_camera_sensor_get();
-    if (s != NULL) {
-      s->set_jpeg_quality(s, 20); // Lower quality
-    }
-    
-    // Try again
-    fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("Second capture failed");
-      return false;
-    }
-    
-    // Restore quality
-    if (s != NULL) {
-      s->set_jpeg_quality(s, 12);
-    }
+    return false;
+  }
+  
+  // Check if image is too large (adjust quality if needed)
+  if (fb->len > 150000) { // 150KB limit
+    Serial.printf("Image large (%d bytes), but proceeding...\n", fb->len);
   }
   
   // Upload image with extended timeout
@@ -272,9 +327,15 @@ bool captureAndUploadImage() {
   http.begin(client, String(serverUrl) + "/robot/image");
   http.addHeader("Content-Type", "image/jpeg");
   http.addHeader("Content-Length", String(fb->len));
+  http.addHeader("Connection", "close"); // Ensure connection is closed after request
   
   Serial.println("Starting image upload...");
+  unsigned long uploadStart = millis();
+  
   int httpCode = http.POST(fb->buf, fb->len);
+  
+  unsigned long uploadTime = millis() - uploadStart;
+  Serial.printf("Upload completed in %lu ms\n", uploadTime);
   
   if (httpCode > 0) {
     Serial.printf("Upload successful! Response code: %d\n", httpCode);
@@ -302,14 +363,17 @@ bool captureAndUploadImage() {
     
     // Log specific error types
     switch (httpCode) {
-      case -1:
-        Serial.println("Connection failed - check server availability");
+      case HTTPC_ERROR_CONNECTION_REFUSED:
+        Serial.println("Connection refused - check server availability");
         break;
-      case -5:
+      case HTTPC_ERROR_CONNECTION_LOST:
         Serial.println("Connection lost - network unstable");
         break;
-      case -11:
+      case HTTPC_ERROR_READ_TIMEOUT:
         Serial.println("Read timeout - server too slow or image too large");
+        break;
+      case HTTPC_ERROR_CONNECTION_FAILED:
+        Serial.println("Connection failed - network issue");
         break;
       default:
         Serial.printf("Unknown error code: %d\n", httpCode);
@@ -322,21 +386,16 @@ bool captureAndUploadImage() {
   }
 }
 
-// Test function for connectivity
-void testConnectivity() {
-  Serial.println("Testing server connectivity...");
-  
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(5000);
-  http.begin(client, String(serverUrl) + "/robot/status");
-  
-  int httpCode = http.GET();
-  if (httpCode > 0) {
-    Serial.printf("Server is reachable! Response: %d\n", httpCode);
-  } else {
-    Serial.printf("Server unreachable! Error: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-  }
-  
-  http.end();
+// Memory diagnostic function
+void printMemoryInfo() {
+  Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("Min free heap: %d bytes\n", ESP.getMinFreeHeap());
+  Serial.printf("Max alloc heap: %d bytes\n", ESP.getMaxAllocHeap());
+}
+
+// Test function for connectivity (can be called manually)
+void performConnectivityTest() {
+  Serial.println("=== Connectivity Test ===");
+  testServerConnectivity();
+  printMemoryInfo();
 }
