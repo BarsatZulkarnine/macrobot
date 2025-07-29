@@ -23,30 +23,35 @@ int targetX = 0, targetY = 0;
 enum Direction { NORTH, EAST, SOUTH, WEST };
 Direction facing = EAST;  // Start facing right
 
-// Movement timing (adjust based on your robot's speed)
-const int MOVE_TIME_MS = 800;    // Time to move one grid cell
-const int TURN_TIME_MS = 600;    // Time to turn 90 degrees
+// Movement timing
+const int MOVE_TIME_MS = 800;
+const int TURN_TIME_MS = 600;
 const int OBSTACLE_DISTANCE = 15; // Distance threshold for obstacles (cm)
 
 // Connection and retry settings
 const int MAX_HTTP_RETRIES = 3;
-const int HTTP_TIMEOUT = 10000;  // 10 seconds
-const int WIFI_RETRY_DELAY = 5000; // 5 seconds
+const int HTTP_TIMEOUT = 10000;
+const int WIFI_RETRY_DELAY = 5000;
 int wifiReconnectAttempts = 0;
 const int MAX_WIFI_RECONNECT_ATTEMPTS = 5;
+
+// Obstacle handling
+int consecutiveObstacles = 0;
+const int MAX_OBSTACLE_RETRIES = 3;
 
 // State machine
 enum RobotState { 
   CHECKING_STATUS,
   MOVING_TO_TARGET, 
   WAITING_FOR_IMAGE,
+  HANDLING_OBSTACLE,
   EXPLORATION_COMPLETE,
   ERROR_STATE
 };
 RobotState robotState = CHECKING_STATUS;
 
 unsigned long lastStatusCheck = 0;
-const unsigned long STATUS_CHECK_INTERVAL = 3000; // Increased to 3 seconds
+const unsigned long STATUS_CHECK_INTERVAL = 3000;
 
 void setup() {
   Serial.begin(115200);
@@ -68,9 +73,7 @@ void setup() {
   connectToWiFi();
   
   if (WiFi.status() == WL_CONNECTED) {
-    // Test server connectivity before starting
     if (testServerConnectivity()) {
-      // Send initial position and start exploration
       if (sendPositionUpdate(0, 0)) {
         if (startExploration()) {
           Serial.println("Robot initialized successfully. Starting DFS exploration...");
@@ -93,7 +96,7 @@ void setup() {
 }
 
 void loop() {
-  // Check WiFi connection and reconnect if needed
+  // Check WiFi connection
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected, attempting reconnection...");
     connectToWiFi();
@@ -115,8 +118,11 @@ void loop() {
       moveToTarget();
       break;
       
+    case HANDLING_OBSTACLE:
+      handleObstacle();
+      break;
+      
     case WAITING_FOR_IMAGE:
-      // Wait for ESP32-CAM to process image
       if (millis() - lastStatusCheck > STATUS_CHECK_INTERVAL) {
         checkRobotStatus();
         lastStatusCheck = millis();
@@ -131,7 +137,6 @@ void loop() {
     case ERROR_STATE:
       Serial.println("Robot in error state. Retrying in 10 seconds...");
       delay(10000);
-      // Try to recover
       if (WiFi.status() == WL_CONNECTED && testServerConnectivity()) {
         robotState = CHECKING_STATUS;
         Serial.println("Recovered from error state");
@@ -236,7 +241,7 @@ bool makeHttpRequest(const String& endpoint, const String& method, const String&
     
     if (attempt < MAX_HTTP_RETRIES) {
       Serial.printf("Retrying request (attempt %d/%d)...\n", attempt + 1, MAX_HTTP_RETRIES);
-      delay(1000 * attempt); // Progressive delay
+      delay(1000 * attempt);
     }
   }
   
@@ -287,6 +292,7 @@ void checkRobotStatus() {
     targetX = doc["next_move"]["x"];
     targetY = doc["next_move"]["y"];
     Serial.printf("New target: (%d, %d)\n", targetX, targetY);
+    consecutiveObstacles = 0; // Reset obstacle counter for new target
     robotState = MOVING_TO_TARGET;
   } else if (doc.containsKey("exploration_complete") && doc["exploration_complete"]) {
     robotState = EXPLORATION_COMPLETE;
@@ -312,9 +318,10 @@ void moveToTarget() {
       moveForwardOneCell();
       currentX += (deltaX > 0) ? 1 : -1;
       Serial.printf("Moved to (%d, %d)\n", currentX, currentY);
+      consecutiveObstacles = 0; // Reset obstacle counter on successful move
     } else {
-      Serial.println("Obstacle detected! Cannot move forward.");
-      robotState = CHECKING_STATUS;
+      Serial.println("Obstacle detected! Handling obstacle...");
+      robotState = HANDLING_OBSTACLE;
       return;
     }
   } 
@@ -326,9 +333,10 @@ void moveToTarget() {
       moveForwardOneCell();
       currentY += (deltaY > 0) ? 1 : -1;
       Serial.printf("Moved to (%d, %d)\n", currentX, currentY);
+      consecutiveObstacles = 0; // Reset obstacle counter on successful move
     } else {
-      Serial.println("Obstacle detected! Cannot move forward.");
-      robotState = CHECKING_STATUS;
+      Serial.println("Obstacle detected! Handling obstacle...");
+      robotState = HANDLING_OBSTACLE;
       return;
     }
   }
@@ -342,6 +350,110 @@ void moveToTarget() {
       Serial.println("Failed to send position update");
       robotState = ERROR_STATE;
     }
+  }
+}
+
+void handleObstacle() {
+  consecutiveObstacles++;
+  Serial.printf("Handling obstacle (attempt %d/%d)\n", consecutiveObstacles, MAX_OBSTACLE_RETRIES);
+  
+  if (consecutiveObstacles >= MAX_OBSTACLE_RETRIES) {
+    Serial.println("Max obstacle retries reached. Marking position as blocked and requesting new target.");
+    
+    // Inform server that this position is blocked
+    if (reportBlockedPosition(targetX, targetY)) {
+      // Reset and wait for new target
+      consecutiveObstacles = 0;
+      robotState = CHECKING_STATUS;
+    } else {
+      Serial.println("Failed to report blocked position");
+      robotState = ERROR_STATE;
+    }
+    return;
+  }
+  
+  // Try different strategies to overcome obstacle
+  Serial.println("Trying to find alternative path...");
+  
+  // Strategy 1: Try backing up and approaching from different angle
+  if (tryAlternativeApproach()) {
+    Serial.println("Alternative approach successful, resuming movement");
+    robotState = MOVING_TO_TARGET;
+  } else {
+    // Strategy 2: Wait and try again (maybe obstacle moved)
+    Serial.println("Alternative approach failed, waiting and retrying...");
+    delay(2000);
+    robotState = MOVING_TO_TARGET;
+  }
+}
+
+bool tryAlternativeApproach() {
+  Serial.println("Attempting alternative approach...");
+  
+  // Back up one step
+  Serial.println("Backing up...");
+  moveBackwardOneCell();
+  delay(500);
+  
+  // Try turning and approaching from a different direction
+  for (int turns = 0; turns < 4; turns++) {
+    turnRight();
+    facing = static_cast<Direction>((facing + 1) % 4);
+    delay(TURN_TIME_MS);
+    stopMotors();
+    
+    if (canMoveForward()) {
+      Serial.println("Found clear path in alternative direction");
+      
+      // Move forward one step to get around obstacle
+      moveForwardOneCell();
+      
+      // Update position based on current facing direction
+      switch (facing) {
+        case NORTH: currentY--; break;
+        case EAST:  currentX++; break;
+        case SOUTH: currentY++; break;
+        case WEST:  currentX--; break;
+      }
+      
+      Serial.printf("Moved to bypass position (%d, %d)\n", currentX, currentY);
+      
+      // Send position update
+      sendPositionUpdate(currentX, currentY);
+      
+      return true;
+    }
+  }
+  
+  Serial.println("No clear path found in any direction");
+  return false;
+}
+
+void moveBackwardOneCell() {
+  // Reverse motor directions
+  digitalWrite(motorA1, LOW);
+  digitalWrite(motorA2, HIGH);
+  digitalWrite(motorB1, LOW);
+  digitalWrite(motorB2, HIGH);
+  
+  delay(MOVE_TIME_MS);
+  stopMotors();
+}
+
+bool reportBlockedPosition(int x, int y) {
+  Serial.printf("Reporting blocked position (%d, %d) to server\n", x, y);
+  
+  // Create JSON payload to report blocked position
+  String jsonPayload = "{\"x\":" + String(x) + ",\"y\":" + String(y) + ",\"blocked\":true}";
+  String response;
+  
+  // You might need to add this endpoint to your Flask server
+  if (makeHttpRequest("/robot/blocked_position", "POST", jsonPayload, response)) {
+    Serial.printf("Blocked position reported - Response: %s\n", response.c_str());
+    return true;
+  } else {
+    Serial.printf("Failed to report blocked position (%d, %d)\n", x, y);
+    return false;
   }
 }
 
@@ -379,10 +491,10 @@ int getDistance() {
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
   
-  long duration = pulseIn(echoPin, HIGH, 30000);  // 30ms timeout
+  long duration = pulseIn(echoPin, HIGH, 30000);
   int distance = duration * 0.034 / 2;
   
-  return (distance == 0) ? 999 : distance;  // Return large value if no echo
+  return (distance == 0) ? 999 : distance;
 }
 
 void moveForwardOneCell() {

@@ -55,13 +55,35 @@ def save_robot_state(state):
 def get_map_data():
     """Get map data with defaults"""
     return load_json(MAP_DATA_FILE, {
-        'visited_positions': [],  # [{'x': 0, 'y': 0, 'human_detected': False, 'image_path': '...', 'timestamp': ...}]
-        'exploration_stack': []   # DFS stack for positions to explore
+        'visited_positions': [],  # [{'x': 0, 'y': 0, 'human_detected': False, 'blocked': False, 'image_path': '...', 'timestamp': ...}]
+        'exploration_stack': [],  # DFS stack for positions to explore
+        'blocked_positions': []   # List of permanently blocked positions [{'x': 0, 'y': 0, 'timestamp': ...}]
     })
 
 def save_map_data(data):
     """Save map data"""
     save_json(MAP_DATA_FILE, data)
+
+def is_position_blocked(x, y, map_data):
+    """Check if a position is blocked"""
+    # Check in visited positions for blocked flag
+    for pos in map_data['visited_positions']:
+        if pos['x'] == x and pos['y'] == y and pos.get('blocked', False):
+            return True
+    
+    # Check in dedicated blocked positions list
+    for pos in map_data.get('blocked_positions', []):
+        if pos['x'] == x and pos['y'] == y:
+            return True
+    
+    return False
+
+def is_position_visited(x, y, map_data):
+    """Check if a position has been visited (explored or blocked)"""
+    for pos in map_data['visited_positions']:
+        if pos['x'] == x and pos['y'] == y:
+            return True
+    return False
 
 # Error handler for all exceptions
 @app.errorhandler(Exception)
@@ -90,15 +112,13 @@ def get_robot_status():
         
         # Check if robot has been at current position and needs image
         current_pos = (state['current_x'], state['current_y'])
-        position_explored = any(
-            pos['x'] == current_pos[0] and pos['y'] == current_pos[1] 
-            for pos in map_data['visited_positions']
-        )
+        position_explored = is_position_visited(current_pos[0], current_pos[1], map_data)
+        position_blocked = is_position_blocked(current_pos[0], current_pos[1], map_data)
         
         response = {
             'current_position': {'x': state['current_x'], 'y': state['current_y']},
             'is_running': state['is_running'],
-            'needs_image': state['is_running'] and not position_explored,
+            'needs_image': state['is_running'] and not position_explored and not position_blocked,
             'waiting_for_image': state['waiting_for_image'],
             'next_move': None
         }
@@ -106,8 +126,26 @@ def get_robot_status():
         # If running and current position is explored, suggest next move
         if state['is_running'] and position_explored and not state['waiting_for_image']:
             if map_data['exploration_stack']:
-                next_pos = map_data['exploration_stack'][-1]  # DFS - take from top
-                response['next_move'] = next_pos
+                # Filter out blocked positions from exploration stack
+                available_positions = [
+                    pos for pos in map_data['exploration_stack']
+                    if not is_position_blocked(pos['x'], pos['y'], map_data)
+                ]
+                
+                if available_positions:
+                    next_pos = available_positions[-1]  # DFS - take from top
+                    response['next_move'] = next_pos
+                    
+                    # Update exploration stack to remove blocked positions
+                    if len(available_positions) != len(map_data['exploration_stack']):
+                        map_data['exploration_stack'] = available_positions
+                        save_map_data(map_data)
+                        logger.info(f"Removed blocked positions from exploration stack")
+                else:
+                    # All remaining positions are blocked
+                    map_data['exploration_stack'] = []
+                    save_map_data(map_data)
+                    response['exploration_complete'] = True
             else:
                 # No more positions to explore
                 response['exploration_complete'] = True
@@ -138,6 +176,11 @@ def start_exploration():
                 {'x': 0, 'y': 1},
                 {'x': -1, 'y': 0},
                 {'x': 0, 'y': -1}
+            ]
+            # Filter out any blocked positions
+            initial_positions = [
+                pos for pos in initial_positions
+                if not is_position_blocked(pos['x'], pos['y'], map_data)
             ]
             map_data['exploration_stack'] = initial_positions
             save_map_data(map_data)
@@ -170,7 +213,7 @@ def update_position():
     try:
         # Handle both JSON and form data
         if request.is_json:
-            data = request.get_json(silent =True) 
+            data = request.get_json(silent=True) 
         else:
             data = request.form.to_dict()
         
@@ -193,16 +236,116 @@ def update_position():
         state = get_robot_state()
         state['current_x'] = x
         state['current_y'] = y
-        state['waiting_for_image'] = True  # Robot should take image at new position
-        save_robot_state(state)
         
-        logger.info(f"Position updated to ({x}, {y}) - waiting for image")
-        return jsonify({'status': 'position_updated', 'action': 'take_image'})
+        # Check if this position is blocked
+        map_data = get_map_data()
+        if is_position_blocked(x, y, map_data):
+            # Position is blocked, don't wait for image
+            state['waiting_for_image'] = False
+            logger.info(f"Position updated to blocked position ({x}, {y})")
+            save_robot_state(state)
+            return jsonify({'status': 'position_updated', 'action': 'position_blocked'})
+        else:
+            # Normal position, wait for image
+            state['waiting_for_image'] = True
+            save_robot_state(state)
+            logger.info(f"Position updated to ({x}, {y}) - waiting for image")
+            return jsonify({'status': 'position_updated', 'action': 'take_image'})
         
     except Exception as e:
         logger.error(f"Error in update_position: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': 'Failed to update position', 'message': str(e)}), 500
+
+@app.route('/robot/blocked_position', methods=['POST'])
+def report_blocked_position():
+    """Handle blocked position report from robot"""
+    try:
+        # Handle both JSON and form data
+        if request.is_json:
+            data = request.get_json(silent=True)
+        else:
+            data = request.form.to_dict()
+        
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
+        x = data.get('x')
+        y = data.get('y')
+        blocked = data.get('blocked', True)
+        
+        # Convert to int if they're strings
+        try:
+            x = int(x) if x is not None else None
+            y = int(y) if y is not None else None
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid x or y coordinates'}), 400
+        
+        if x is None or y is None:
+            return jsonify({'error': 'Missing x or y coordinates'}), 400
+        
+        logger.info(f"Position ({x}, {y}) reported as blocked")
+        
+        # Get current map data
+        map_data = get_map_data()
+        
+        # Remove the blocked position from exploration stack if it exists
+        original_stack_length = len(map_data['exploration_stack'])
+        map_data['exploration_stack'] = [
+            pos for pos in map_data['exploration_stack'] 
+            if not (pos['x'] == x and pos['y'] == y)
+        ]
+        removed_count = original_stack_length - len(map_data['exploration_stack'])
+        
+        # Add to visited positions as blocked (no image, no human detection)
+        # Remove any existing entry for this position first
+        map_data['visited_positions'] = [
+            pos for pos in map_data['visited_positions'] 
+            if not (pos['x'] == x and pos['y'] == y)
+        ]
+        
+        # Add blocked position entry
+        map_data['visited_positions'].append({
+            'x': x,
+            'y': y,
+            'human_detected': False,
+            'blocked': True,
+            'image_path': None,
+            'timestamp': time.time()
+        })
+        
+        # Also add to dedicated blocked positions list for faster lookup
+        if 'blocked_positions' not in map_data:
+            map_data['blocked_positions'] = []
+        
+        # Remove existing entry if present
+        map_data['blocked_positions'] = [
+            pos for pos in map_data['blocked_positions']
+            if not (pos['x'] == x and pos['y'] == y)
+        ]
+        
+        # Add new blocked position entry
+        map_data['blocked_positions'].append({
+            'x': x,
+            'y': y,
+            'timestamp': time.time()
+        })
+        
+        # Save updated map data
+        save_map_data(map_data)
+        
+        logger.info(f"Blocked position ({x}, {y}) processed. Removed {removed_count} entries from exploration stack")
+        
+        return jsonify({
+            'status': 'blocked_position_processed',
+            'removed_from_stack': removed_count,
+            'remaining_positions': len(map_data['exploration_stack'])
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in report_blocked_position: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': 'Failed to process blocked position', 'message': str(e)}), 500
 
 @app.route('/robot/image', methods=['POST'])
 def process_image():
@@ -212,6 +355,12 @@ def process_image():
         x, y = state['current_x'], state['current_y']
         
         logger.info(f"Processing image for position ({x}, {y})")
+        
+        # Check if position is blocked - shouldn't receive images for blocked positions
+        map_data = get_map_data()
+        if is_position_blocked(x, y, map_data):
+            logger.warning(f"Received image for blocked position ({x}, {y})")
+            return jsonify({'error': 'Position is blocked', 'human_detected': False}), 400
         
         # Handle different types of image uploads
         image_data = None
@@ -255,8 +404,6 @@ def process_image():
             human_detected = False  # Default to False if detection fails
         
         # Update map data
-        map_data = get_map_data()
-        
         # Remove current position from visited if exists and add updated entry
         map_data['visited_positions'] = [
             pos for pos in map_data['visited_positions'] 
@@ -267,6 +414,7 @@ def process_image():
             'x': x,
             'y': y,
             'human_detected': human_detected,
+            'blocked': False,
             'image_path': f'uploads/{filename}',
             'timestamp': time.time()
         })
@@ -281,17 +429,15 @@ def process_image():
         
         new_positions_count = 0
         for pos in adjacent_positions:
-            # Check if position already visited or in stack
-            already_visited = any(
-                v['x'] == pos['x'] and v['y'] == pos['y'] 
-                for v in map_data['visited_positions']
-            )
+            # Check if position already visited, blocked, or in stack
+            already_visited = is_position_visited(pos['x'], pos['y'], map_data)
+            already_blocked = is_position_blocked(pos['x'], pos['y'], map_data)
             already_in_stack = any(
                 s['x'] == pos['x'] and s['y'] == pos['y'] 
                 for s in map_data['exploration_stack']
             )
             
-            if not already_visited and not already_in_stack:
+            if not already_visited and not already_blocked and not already_in_stack:
                 map_data['exploration_stack'].append(pos)
                 new_positions_count += 1
         
@@ -325,8 +471,20 @@ def get_next_move():
         
         map_data = get_map_data()
         
-        if not map_data['exploration_stack']:
+        # Filter out blocked positions from exploration stack
+        available_positions = [
+            pos for pos in map_data['exploration_stack']
+            if not is_position_blocked(pos['x'], pos['y'], map_data)
+        ]
+        
+        if not available_positions:
             return jsonify({'exploration_complete': True, 'next_move': None})
+        
+        # Update exploration stack if we filtered out positions
+        if len(available_positions) != len(map_data['exploration_stack']):
+            map_data['exploration_stack'] = available_positions
+            save_map_data(map_data)
+            logger.info("Removed blocked positions from exploration stack")
         
         # Get next position from stack (DFS - LIFO)
         next_position = map_data['exploration_stack'].pop()
@@ -349,7 +507,63 @@ def get_next_move():
 def get_map():
     """Get map data for visualization"""
     try:
-        return jsonify(get_map_data())
+        map_data = get_map_data()
+        
+        # Separate data by type for better visualization
+        explored_positions = []
+        blocked_positions = []
+        human_detected_positions = []
+        
+        for pos in map_data['visited_positions']:
+            if pos.get('blocked', False):
+                blocked_positions.append({
+                    'x': pos['x'],
+                    'y': pos['y'],
+                    'timestamp': pos['timestamp']
+                })
+            elif pos.get('human_detected', False):
+                human_detected_positions.append({
+                    'x': pos['x'],
+                    'y': pos['y'],
+                    'image_path': pos.get('image_path'),
+                    'timestamp': pos['timestamp']
+                })
+            else:
+                explored_positions.append({
+                    'x': pos['x'],
+                    'y': pos['y'],
+                    'image_path': pos.get('image_path'),
+                    'timestamp': pos['timestamp']
+                })
+        
+        # Add dedicated blocked positions if any
+        for pos in map_data.get('blocked_positions', []):
+            # Avoid duplicates
+            if not any(bp['x'] == pos['x'] and bp['y'] == pos['y'] for bp in blocked_positions):
+                blocked_positions.append({
+                    'x': pos['x'],
+                    'y': pos['y'],
+                    'timestamp': pos['timestamp']
+                })
+        
+        response = {
+            'visited_positions': map_data['visited_positions'],  # Keep original for compatibility
+            'exploration_stack': map_data['exploration_stack'],
+            'blocked_positions': map_data.get('blocked_positions', []),
+            # Enhanced data for visualization
+            'explored_positions': explored_positions,
+            'blocked_positions_list': blocked_positions,
+            'human_detected_positions': human_detected_positions,
+            'statistics': {
+                'total_explored': len(explored_positions),
+                'total_blocked': len(blocked_positions),
+                'humans_found': len(human_detected_positions),
+                'pending_exploration': len(map_data['exploration_stack'])
+            }
+        }
+        
+        return jsonify(response)
+        
     except Exception as e:
         logger.error(f"Error in get_map: {str(e)}")
         return jsonify({'error': 'Failed to get map data', 'message': str(e)}), 500
@@ -391,7 +605,8 @@ def reset_all():
         # Reset map data
         initial_map = {
             'visited_positions': [],
-            'exploration_stack': []
+            'exploration_stack': [],
+            'blocked_positions': []
         }
         save_map_data(initial_map)
         
